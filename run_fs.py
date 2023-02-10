@@ -154,8 +154,8 @@ command = (
     + "m5 exit;"
 )
 
-# If you leave the above blank, the simulation will drop to a shell prompt and
-# you can run any command you want, including executing benchmarks wrapped in
+# If you leave the command str blank, the simulation will drop to a shell prompt
+# and you can run any command you want, including executing benchmarks wrapped in
 # workbegin/end, e.g.,:
 #  "m5 workbegin; ./matmul_small; m5 workend;"
 # (Caution: this doesn't always play nice with --sample mode.)
