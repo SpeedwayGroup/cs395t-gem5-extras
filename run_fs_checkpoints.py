@@ -44,14 +44,15 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--benchmark", type=str, help="benchmark to run", choices=benchmark_choices)
 parser.add_argument("--size", type=str, help="input size (small, medium, large)", choices=size_choices)
+parser.add_argument("--command", type=str, help="instead of running a benchmark and size, run an arbitrary command")
+parser.add_argument("--o3", default=False, action='store_true', help="use O3 core for ROI instead of Timing")
 parser.add_argument("--cores", type=int, default=2, help="number of cores")
 parser.add_argument("--checkpoint-roi", type=str, help="create a single checkpoint at the start of ROI in dir CHECKPOINT_ROI and then exit")
 parser.add_argument("--take-checkpoints", type=int, help="create checkpoint every TAKE_CHECKPOINTS million instructions inside ROI")
-parser.add_argument("--checkpoint-path", type=str, default="checkpoints", help="the directory in which to store ROI checkpoints")
+parser.add_argument("--checkpoint-path", type=str, default="checkpoints", help="the directory in which to store TAKE_CHECKPOINTS checkpoints")
 parser.add_argument("--restore", type=str, help="restore simulation from ROI checkpoint RESTORE")
 parser.add_argument("--warmup", type=int, help="warm up for WARMUP million instructions after restoring from checkpoint")
 parser.add_argument("--insts", type=int, help="simulate for INSTS million instructions after warmup, after restoring from checkpoint")
-parser.add_argument("--o3", default=False, action='store_true', help="use O3 core for ROI instead of Timing")
 parser.add_argument("--init-checkpoint", type=str, help="create a post-kernel-boot checkpoint with atomic core and exit")
 parser.add_argument("--start-from", type=str, help="start benchmark execution from a post-kernel-boot checkpoint in START_FROM")
 args = parser.parse_args()
@@ -60,20 +61,14 @@ requires(
     isa_required=ISA.X86,
 )
 
-if(not args.benchmark and not (args.restore or args.init_checkpoint)):
-    print("--benchmark is required when not restoring from checkpoint or creating init checkpoint")
+if(not ((args.benchmark and args.size) or args.command) and not (args.restore or args.init_checkpoint)):
+    print("--benchmark/--size or --command are required when not restoring from checkpoint or creating init checkpoint")
     sys.exit(1)
-if(not args.size and not (args.restore or args.init_checkpoint)):
-    print("--size is required when not restoring from checkpoint or creating init checkpoint")
-    sys.exit(1)
-if((args.take_checkpoints or args.checkpoint_roi) and args.restore):
-    print("--take-checkpoints and --restore are mutually exclusive!")
-    sys.exit(1)
-if(args.init_checkpoint and args.restore):
-    print("--init-checkpoint and --restore are mutually exclusive!")
+if((args.take_checkpoints or args.checkpoint_roi or args.init_checkpoint) and args.restore):
+    print("checkpoint creation and --restore are mutually exclusive!")
     sys.exit(1)
 if(args.init_checkpoint and (args.take_checkpoints or args.checkpoint_roi)):
-    print("--init-checkpoint and --take-checkpoints are mutually exclusive!")
+    print("--init-checkpoint and --take-checkpoints/--checkpoint-roi are mutually exclusive!")
     sys.exit(1)
 if(args.init_checkpoint and args.start_from):
     print("--init-checkpoint and --start-from are mutually exclusive!")
@@ -86,8 +81,8 @@ if(args.warmup and not args.restore):
     sys.exit(1)
 
 if(args.warmup):
-    if(args.warmup < 1):
-        print("WARMUP must be positive")
+    if(args.warmup < 0):
+        print("WARMUP must be non-negative")
         sys.exit(1)
     args.warmup *= 1000000
 if(args.insts):
@@ -151,7 +146,7 @@ board = X86Board(
     cache_hierarchy=cache_hierarchy,
 )
 
-if(not (args.restore or args.init_checkpoint)):
+if(args.benchmark and args.size):
     # GAP command string (copied to disk image and executed)
     if(args.benchmark in [ "bc", "bfs", "cc", "pr" ]):
         if(args.size == "small"):
@@ -199,9 +194,14 @@ if(not (args.restore or args.init_checkpoint)):
                                                                     inputName, args.cores)
         )
 
-# For init post-kernel checkpoint, use a hack-back script to checkpoint
-# on first execution and run arbitrary new readfile command on second
-hackback_command=("""
+# For initial post-kernel checkpoint, we use the hackish magic that is
+# Joel Hestness's infamous hack_back_ckpt.rcS: The first time we invoke our
+# runscript, we call m5 checkpoint. On restore, we use an environment variable
+# to detect we should instead load a NEW runscript, which has the command
+# to actually run our benchmark.  This way our post-kernel checkpoint can be used
+# to invoke any arbitrary command on the disk image rather than being restricted
+# to a single, particular benchmark invocation.
+hackback=("""
     # Test if the RUNSCRIPT_VAR environment variable is already set
     if [ "${RUNSCRIPT_VAR+set}" != set ]
     then
@@ -255,9 +255,11 @@ if(args.restore or args.start_from):
     print("###Restoring checkpoint from: {}".format(chkptDir_restore))
 
 if(args.init_checkpoint):
-    commandStr = hackback_command
+    commandStr = hackback
 elif(args.restore):
     commandStr = None
+elif(args.command):
+    commandStr = args.command
 else:
     commandStr = command
 
@@ -293,7 +295,7 @@ def checkpoint_roibegin_handler():
     simulator.save_checkpoint(chkptDir)
     yield True
 
-def checkpoint_workbegin_handler():
+def checkpoints_workbegin_handler():
     global start_tick
     print("===Entering stats ROI")
     m5.stats.reset()
@@ -305,7 +307,7 @@ def checkpoint_workbegin_handler():
     simulator.save_checkpoint(checkpoint)
     yield False
 
-def maxinsts_handler():
+def checkpoints_maxinsts_handler():
     checkpoint_num = 1
     while True:
         checkpoint_num += 1
@@ -317,12 +319,15 @@ def maxinsts_handler():
 
 def restore_maxinsts_handler():
     global start_tick
-    # first max_insts will be end of warmup
-    print("===Entering stats ROI")
-    m5.stats.reset()
-    start_tick = m5.curTick()
-    simulator.schedule_max_insts(args.insts)
-    yield False
+    if(args.warmup and args.warmup > 0):
+        # first max_insts will be end of warmup
+        print("===Entering stats ROI")
+        m5.stats.reset()
+        start_tick = m5.curTick()
+        # schedule next maxinsts end if we're running limited instruction count
+        if(args.insts):
+            simulator.schedule_max_insts(args.insts)
+        yield False
     # second max_insts will be end of ROI
     print("===Exiting stats ROI")
     m5.stats.dump()
@@ -335,9 +340,9 @@ def checkpoint_handler():
 
 if(args.take_checkpoints):
     event_handlers = {
-        ExitEvent.WORKBEGIN : checkpoint_workbegin_handler(),
+        ExitEvent.WORKBEGIN : checkpoints_workbegin_handler(),
         ExitEvent.WORKEND : workend_handler(),
-        ExitEvent.MAX_INSTS : maxinsts_handler()
+        ExitEvent.MAX_INSTS : checkpoints_maxinsts_handler()
     }
 elif(args.checkpoint_roi):
     event_handlers = {
@@ -366,10 +371,18 @@ simulator = Simulator(
 
 start_tick = 0
 globalStart = time.time()
-
 print("***Beginning simulation!")
-simulator.run()
 
+if(args.restore):
+    if(args.warmup and args.warmup > 0):
+        simulator.schedule_max_insts(args.warmup)
+    else:
+        print("===Entering stats ROI")
+        m5.stats.reset()
+        if(args.insts):
+            simulator.schedule_max_insts(args.insts)
+
+simulator.run()
 end_tick = m5.curTick()
 
 exit_cause = simulator.get_last_exit_event_cause()
