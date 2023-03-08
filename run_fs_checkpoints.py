@@ -235,12 +235,14 @@ hackback=("""
     fi
 """)
 
-# Create init checkpoint directory
+# Create checkpoint directory
 if(args.init_checkpoint):
     chkptDir = Path(args.init_checkpoint)
     chkptDir.mkdir(exist_ok=True)
-# Create ROI checkpoints directory
-if(args.take_checkpoints or args.checkpoint_roi):
+elif(args.checkpoint_roi):
+    chkptDir = Path(args.checkpoint_roi)
+    chkptDir.mkdir(exist_ok=True)
+elif(args.take_checkpoints):
     chkptDir = Path(args.checkpoint_path)
     chkptDir.mkdir(exist_ok=True)
 # Verify checkpoint restore directory exists
